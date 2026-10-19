@@ -1,0 +1,484 @@
+---
+title: "Exam Setup"
+description: "Create and change exams, tests and sessions through the API, check whether an exam is ready, and run the IRT calculation."
+sidebarTitle: "Exam Setup"
+---
+
+Every request on this page requires a [Bearer API key](/en/api/autentikasi).
+
+With these endpoints your system can set an exam up from start to finish without opening the admin panel: create the exam with its tests and sessions, assign a question package to each session, check that the exam is ready, and run the IRT calculation once participants have finished.
+
+## Flow
+
+1. Prepare question packages through the [Question Import API](/en/api/import-soal) and store `question_bank.id`, or pick an existing question package with `GET /question-banks`.
+2. Create the exam with its tests and sessions in one `POST /exams` request.
+3. Check `GET /exams/{exam}/readiness` until `ready` is `true`.
+4. Register participants and create access links through [Exam Registration and Access Links](/en/api/pendaftaran-ujian).
+5. For tests scored with IRT, run `POST /exams/{exam}/irt-calculations` once participants have finished. Scores are sent through the `exam_result.scored` webhook and are available in the [Exam Results API](/en/api/hasil-ujian).
+
+## Rules
+
+- **Kind of exam.** Exams created through the API take no payment inside the CBT and are not multi-level. Multi-level exams and exams with payment inside the CBT that were created in the admin panel can still be read, but can only be changed or deleted in the admin panel. Manual-answer tests (essay/file upload) are created in the admin panel; through the API only their name, instructions and sessions can change.
+- **Edition** (`edition`):
+  - `standard` (Standard Exam): up to 4 tests, without CAT and without camera, screen or dual-monitor proctoring.
+  - `professional` (Professional Exam): up to 30 tests, with every feature.
+  - Credit is used when a participant starts a test, not when the exam is created. A professional exam uses professional credit; a standard exam uses free credit first, then professional credit. Without credit an exam can still be created, but participants cannot start its tests.
+- **Times** are sent in ISO 8601 with an offset, for example `2026-11-10T08:00:00+07:00` or `2026-11-10T01:00:00Z`, and are returned in WIB (`+07:00`). A time without an offset, such as `2026-11-10 08:00:00`, is refused with `422`. An exam's `end_at` is at most one year from now.
+- **Sessions** must sit inside the exam's time range and last at least as long as their test. A session's question package must belong to the project, match its test's type (CBT/CAT for CBT and CAT tests, manual answer for manual-answer tests) and hold at least one question; for a CAT test every question needs a difficulty level.
+- **Automatic sessions** (`is_auto_assign_session`, default `true`): registered participants get the first (earliest-created) session of every test. Participants registered before a test had a session get that session automatically when it is created.
+- **Test order** follows the order in which the tests were created. When `is_must_be_in_order` is `true`, participants must finish the tests in that order.
+- **Participants see an exam** while it is inside its time range and not archived. A test can only be started during a session that has a question package.
+
+### What is locked
+
+| Situation | What cannot be done |
+| --- | --- |
+| The exam is locked (locked when archived in the admin panel) | Any change to the exam, its tests and its sessions. |
+| A participant is taking a test | Changing the exam dates, that test's duration, and the session the participant is in. |
+| A participant has started | Deleting the exam, changing the test type, and replacing the question package of that session. |
+| Participants are registered | Changing the exam code, deleting tests, and deleting sessions participants are placed in. |
+
+### Error format
+
+Invalid input is returned with status `422` in the same error format as other endpoints. Error keys name the field, nested fields included, for example `exam_quizzes.0.sessions.1.end_at`.
+
+```json
+{
+  "success": false,
+  "message": "Data yang dikirim tidak valid.",
+  "errors": {
+    "exam_quizzes.0.sessions.0.end_at": ["Sesi minimal 90 menit, sama dengan durasi tes."],
+    "exam_quizzes.1.is_camera_proctoring": ["Hanya tersedia untuk ujian edisi professional."]
+  }
+}
+```
+
+A change the exam's current state does not allow is returned with status `409` and a `code` field:
+
+```json
+{
+  "success": false,
+  "message": "Tanggal ujian tidak dapat diubah karena ada peserta yang sedang mengerjakan tes.",
+  "code": "attempt_in_progress"
+}
+```
+
+| `code` | Meaning |
+| --- | --- |
+| `exam_code_taken` | Another exam of the project already uses `name_short`. The response carries that exam's `exam_id`, so a repeated request can be recognised. |
+| `exam_locked` | The exam was locked when it was archived in the admin panel. |
+| `tiered_exam_not_supported` | A multi-level exam can only be changed in the admin panel. |
+| `paid_exam_not_supported` | An exam with payment inside the CBT can only be changed in the admin panel. |
+| `storage_full` | The project storage is full, so new exams and tests cannot be created. |
+| `attempt_in_progress` | A participant is taking a test. |
+| `attempt_started` | A participant has started a test. |
+| `participants_registered` | Participants are registered or placed in the session. |
+| `no_irt_exam_quiz` | The exam has no test scored with IRT. |
+| `no_completed_attempts` | No participant has finished a test yet. |
+| `calculation_running` | The exam's IRT calculation is already queued or running. |
+
+## Test settings
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `exam_type` | `cbt` | `cbt` or `cat`. CAT is for the professional edition only and supports only the `score` `score_type`. |
+| `score_type` | `score` | `score` (sum of correct/wrong), `answer_score` (sum of answer scores), `group` (psychometric), `irt` (UTBK 0–1000 reference), `irt_tka_sma` (200–800) or `irt_tka_sd_smp` (0–100). IRT scores are only filled in once the IRT calculation has run (see [Readiness and scoring](#readiness-and-scoring)). |
+| `duration_minutes` | — | The test's working time, 1–1440 whole minutes. Required when creating a test. Tests created in the admin panel can have a fractional duration, such as `45.5`. |
+| `description` | Standard instructions | HTML instructions for the test, up to 1,000 characters of text. It can use `{{NAMA_TES}}`, `{{JUMLAH_SOAL}}` and `{{DURASI_TES}}`. |
+| `is_show_score` | `false` | Show Score: show the participant's score after they finish. |
+| `is_show_summary` | `false` | Show Summary: show the correct/wrong summary after the participant finishes. |
+| `is_show_explanation_per_question` | `false` | Show the Explanation per Question, taken from each question in the question package, after the participant finishes. Turning it on stops using the explanation PDF uploaded for the test in the admin panel. |
+| `is_switch_tab_proctoring` | `false` | Tab Switch Detection. |
+| `is_camera_proctoring` | `false` | Participants must turn their camera on while taking the test. Professional edition only. |
+| `is_screen_proctoring` | `false` | Participants must share their screen while taking the test. Professional edition only. |
+| `is_dual_screen_proctoring` | `false` | Allow Only One Screen (monitor). Professional edition only. |
+| `is_audio_question_only_once` | `false` | Play the Audio Question Once. |
+| `is_audio_answer_only_once` | `false` | Play the Audio Answer Once. |
+
+## Exam endpoints
+
+<Accordion title="POST /exams — Create an exam with its tests and sessions">
+  The whole request is checked first; if anything is wrong, nothing is stored. Tests and sessions are optional and can be added later.
+
+  ### Parameters
+
+  | Name | Location | Required | Type | Description |
+  | --- | --- | --: | --- | --- |
+  | `name` | Body | Yes | string | Exam name, up to 255 characters. |
+  | `name_short` | Body | Yes | string | Exam code, unique per project, up to 50 characters: letters, digits, `-` and `#`. Stored in upper case. |
+  | `description` | Body | No | string | Exam description HTML (tags `b i em span strong br`), up to 1,000 characters of text. Default: the exam name. |
+  | `start_at`, `end_at` | Body | Yes | datetime | The exam's time range. |
+  | `edition` | Body | No | enum | `standard` or `professional`. Default `standard`. |
+  | `is_must_be_in_order` | Body | No | boolean | Tests must be taken in order. Default `false`. |
+  | `is_force_complete` | Body | No | boolean | A test must be finished without a break. Default `false`. |
+  | `is_show_score` | Body | No | boolean | Show the exam's final score to participants. Default `false`. |
+  | `final_score_type` | Body | No | integer | `1` sum, `2` average. Default `2`. |
+  | `is_auto_assign_session` | Body | No | boolean | Default `true`. |
+  | `exam_quizzes` | Body | No | array | The exam's tests, see [Test settings](#test-settings). Each can hold `sessions`. |
+  | `exam_quizzes.*.sessions` | Body | No | array | The test's sessions: `name`, `start_at`, `end_at` and `question_bank_id` (may be `null` and set later). Up to 50 sessions per test. |
+
+  ### Example request
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "Tryout SNBT 1",
+      "name_short": "TO-SNBT-1",
+      "start_at": "2026-11-10T08:00:00+07:00",
+      "end_at": "2026-11-10T17:00:00+07:00",
+      "edition": "professional",
+      "is_must_be_in_order": true,
+      "exam_quizzes": [
+        {
+          "name": "Penalaran Umum",
+          "duration_minutes": 90,
+          "score_type": "irt",
+          "is_switch_tab_proctoring": true,
+          "sessions": [
+            { "name": "Sesi 1", "start_at": "2026-11-10T08:00:00+07:00", "end_at": "2026-11-10T10:00:00+07:00", "question_bank_id": 88 }
+          ]
+        },
+        {
+          "name": "Literasi Bahasa Indonesia",
+          "duration_minutes": 60,
+          "score_type": "irt",
+          "sessions": [
+            { "name": "Sesi 1", "start_at": "2026-11-10T10:00:00+07:00", "end_at": "2026-11-10T11:00:00+07:00", "question_bank_id": 89 }
+          ]
+        }
+      ]
+    }'
+  ```
+
+  ### Example response
+
+  Status `201`. The body is the same as the [exam details](/en/api/ujian), including `exam_quizzes` and `sessions` with their IDs. Store the exam, test and session IDs for later changes.
+
+  ```json
+  {
+    "success": true,
+    "message": "Ujian berhasil dibuat.",
+    "data": {
+      "id": 31,
+      "name": "Tryout SNBT 1",
+      "name_short": "TO-SNBT-1",
+      "start_at": "2026-11-10T08:00:00+07:00",
+      "end_at": "2026-11-10T17:00:00+07:00",
+      "is_auto_assign_session": true,
+      "is_must_be_in_order": true,
+      "is_force_complete": false,
+      "is_show_score": false,
+      "edition": "professional",
+      "final_score_type": 2,
+      "exam_quizzes": [
+        {
+          "id": 120,
+          "exam_id": 31,
+          "name": "Penalaran Umum",
+          "level": 1,
+          "duration_minutes": 90,
+          "exam_type": "cbt",
+          "score_type": "irt",
+          "is_switch_tab_proctoring": true,
+          "sessions": [
+            { "id": 301, "exam_quiz_id": 120, "name": "Sesi 1", "start_at": "2026-11-10T08:00:00+07:00", "end_at": "2026-11-10T10:00:00+07:00", "question_bank_id": 88 }
+          ]
+        },
+        {
+          "id": 121,
+          "exam_id": 31,
+          "name": "Literasi Bahasa Indonesia",
+          "level": 2,
+          "duration_minutes": 60,
+          "exam_type": "cbt",
+          "score_type": "irt",
+          "is_switch_tab_proctoring": false,
+          "sessions": [
+            { "id": 302, "exam_quiz_id": 121, "name": "Sesi 1", "start_at": "2026-11-10T10:00:00+07:00", "end_at": "2026-11-10T11:00:00+07:00", "question_bank_id": 89 }
+          ]
+        }
+      ],
+      "participants_count": 0
+    }
+  }
+  ```
+
+  The example above is shortened; the full response carries every exam, test and session field.
+</Accordion>
+
+<Accordion title="PATCH /exams/{exam} — Change an exam">
+  Only the fields sent change. The fields are the same as `POST /exams` without `exam_quizzes`. The endpoint also accepts the `PUT` method.
+
+  - The new time range must still contain every session; change the sessions first when needed.
+  - Changing `edition` to `standard` is refused when the exam has more than 4 tests or a test that uses a professional feature.
+  - Changing `final_score_type` recalculates the participants' final scores.
+  - Turning `is_auto_assign_session` on places participants without a session in the first session of every test right away.
+
+  ### Example request
+
+  ```bash
+  curl -X PATCH "https://app.indolat.com/api/v1/exams/31" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "end_at": "2026-11-10T18:00:00+07:00", "is_show_score": true }'
+  ```
+
+  The response holds the updated exam, in the same shape as `POST /exams`.
+</Accordion>
+
+<Accordion title="DELETE /exams/{exam} — Delete an exam">
+  Refused with `409` (`attempt_started`) once a participant has started a test. Multi-level exams and exams with payment inside the CBT can only be deleted in the admin panel.
+
+  ```bash
+  curl -X DELETE "https://app.indolat.com/api/v1/exams/31" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+</Accordion>
+
+## Test endpoints
+
+<Accordion title="POST /exams/{exam}/quizzes — Add a test">
+  The body is the same as one `exam_quizzes` item of `POST /exams`, `sessions` included. The new test goes last in the order. Participants already registered get the new test straight away, and its session when automatic sessions are on.
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams/31/quizzes" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "Literasi Bahasa Inggris",
+      "duration_minutes": 30,
+      "score_type": "irt",
+      "sessions": [
+        { "name": "Sesi 1", "start_at": "2026-11-10T11:00:00+07:00", "end_at": "2026-11-10T12:00:00+07:00", "question_bank_id": 90 }
+      ]
+    }'
+  ```
+
+  Status `201`; the response holds the test with its sessions.
+</Accordion>
+
+<Accordion title="PATCH /exams/{exam}/quizzes/{examQuiz} — Change a test">
+  Only the fields sent change: `name`, `exam_type`, `duration_minutes`, `score_type`, `description` and the `is_*` settings. A new duration cannot be longer than the test's existing sessions. On a manual-answer test only `name` and `description` can change; other fields are refused with `422`. The endpoint also accepts the `PUT` method.
+
+  ```bash
+  curl -X PATCH "https://app.indolat.com/api/v1/exams/31/quizzes/120" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "is_show_score": true, "is_show_summary": true }'
+  ```
+</Accordion>
+
+<Accordion title="DELETE /exams/{exam}/quizzes/{examQuiz} — Delete a test">
+  Refused with `409` (`participants_registered`) once participants are registered for the exam. The test's sessions are deleted with it.
+
+  ```bash
+  curl -X DELETE "https://app.indolat.com/api/v1/exams/31/quizzes/121" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+</Accordion>
+
+## Session endpoints
+
+<Accordion title="POST /exams/{exam}/quizzes/{examQuiz}/sessions — Add a session">
+  | Name | Location | Required | Type | Description |
+  | --- | --- | --: | --- | --- |
+  | `name` | Body | Yes | string | Session name, up to 255 characters. |
+  | `start_at`, `end_at` | Body | Yes | datetime | The session's schedule, inside the exam's time range and at least as long as the test. |
+  | `question_bank_id` | Body | No | integer/null | ID of the question package taken in this session. Its type must match the test: CBT/CAT, or manual answer for a manual-answer test. |
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams/31/quizzes/120/sessions" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "name": "Sesi 2", "start_at": "2026-11-10T13:00:00+07:00", "end_at": "2026-11-10T15:00:00+07:00", "question_bank_id": 88 }'
+  ```
+
+  Status `201`:
+
+  ```json
+  {
+    "success": true,
+    "message": "Sesi berhasil ditambahkan.",
+    "data": {
+      "id": 303,
+      "exam_quiz_id": 120,
+      "name": "Sesi 2",
+      "start_at": "2026-11-10T13:00:00+07:00",
+      "end_at": "2026-11-10T15:00:00+07:00",
+      "question_bank_id": 88
+    }
+  }
+  ```
+
+  Participants still working when the session ends are finished automatically by the system.
+</Accordion>
+
+<Accordion title="PATCH /exams/{exam}/sessions/{session} — Change a session">
+  Only the fields sent change and are checked, so renaming a session does not recheck its schedule and question package. Refused with `409` while a participant is working in this session, and the question package cannot be replaced once a participant has started. To switch to a new question package revision before the exam starts, send the new `question_bank_id`. The endpoint also accepts the `PUT` method.
+
+  ```bash
+  curl -X PATCH "https://app.indolat.com/api/v1/exams/31/sessions/301" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "question_bank_id": 95 }'
+  ```
+</Accordion>
+
+<Accordion title="DELETE /exams/{exam}/sessions/{session} — Delete a session">
+  Refused with `409` (`participants_registered`) once participants are placed in this session.
+
+  ```bash
+  curl -X DELETE "https://app.indolat.com/api/v1/exams/31/sessions/303" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+</Accordion>
+
+## Readiness and scoring
+
+<Accordion title="GET /exams/{exam}/readiness — Check whether an exam is ready">
+  Lists what keeps participants from taking the exam. `ready` is `true` when there is no issue with `severity` `error`; a `warning` flags something to look at that does not block the exam.
+
+  | `code` | Severity | Meaning |
+  | --- | --- | --- |
+  | `exam_archived` | error | The exam is archived, so participants do not see it. |
+  | `exam_ended` | error | The exam's time range is over. |
+  | `no_exam_quizzes` | error | The exam has no test. |
+  | `no_session` | error | A test has no session. |
+  | `no_question_bank` | error | A session has no question package. |
+  | `empty_question_bank` | error | A session's question package has no questions. |
+  | `missing_question_levels` | error | A CAT test uses a question package with questions that have no difficulty level. |
+  | `session_outside_exam` | error | A session is outside the exam's time range. |
+  | `session_too_short` | error | A session is shorter than its test. |
+  | `all_sessions_ended` | error | Every session of a test is over, so no participant can start it. |
+  | `exam_locked` | warning | The exam is locked, so it can no longer change; participants can still take it. |
+  | `participants_without_session` | warning | Some participants have no session yet. |
+  | `session_ended` | warning | A session is over while another session of the same test is still running or upcoming. |
+  | `no_credit` | warning | The project has no exam credit left; participants cannot start tests. |
+
+  ```bash
+  curl -X GET "https://app.indolat.com/api/v1/exams/31/readiness" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+
+  ```json
+  {
+    "success": true,
+    "message": null,
+    "data": {
+      "exam_id": 31,
+      "ready": false,
+      "issues": [
+        {
+          "severity": "error",
+          "code": "no_question_bank",
+          "message": "Sesi \"Sesi 1\" belum memiliki paket soal.",
+          "exam_quiz_id": 121,
+          "session_id": 302
+        }
+      ]
+    }
+  }
+  ```
+</Accordion>
+
+<Accordion title="POST /exams/{exam}/irt-calculations — Run the IRT calculation">
+  Calculates the scores of every IRT test of the exam, like **Calculate Score → IRT Calculation** in the admin panel. It can run once a participant has finished a test and nobody is still taking one. It can run again, for example after late participants finish; every score change sends the `exam_result.scored` webhook. While a calculation is still queued or running, another request is refused with `409` (`calculation_running`).
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams/31/irt-calculations" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+
+  Status `202`:
+
+  ```json
+  {
+    "success": true,
+    "message": "Perhitungan IRT diantrekan. Nilai baru dikirim lewat webhook exam_result.scored.",
+    "data": { "exam_id": 31, "exam_quiz_ids": [120, 121] }
+  }
+  ```
+</Accordion>
+
+<Accordion title="GET /exams/{exam}/irt-calculations — IRT calculation status">
+  The status of the latest calculation of every IRT test:
+
+  | `status` | Meaning |
+  | --- | --- |
+  | `not_started` | The calculation has never run. |
+  | `queued` | The calculation is queued and has not started yet; `queued_at` holds the time it was queued. |
+  | `running` | The calculation is running. |
+  | `finished` | The calculation has finished. |
+  | `failed` | The calculation failed. Run it again with `POST /exams/{exam}/irt-calculations`. |
+
+  ```json
+  {
+    "success": true,
+    "message": null,
+    "data": [
+      {
+        "exam_quiz_id": 120,
+        "exam_quiz_name": "Penalaran Umum",
+        "status": "finished",
+        "queued_at": null,
+        "started_at": "2026-11-10T18:05:00+07:00",
+        "finished_at": "2026-11-10T18:06:12+07:00"
+      }
+    ]
+  }
+  ```
+</Accordion>
+
+## Question packages
+
+<Accordion title="GET /question-banks — List question packages">
+  The project's question packages, to assign to sessions. A question package created by an [import](/en/api/import-soal) has `is_locked: true` and a `source` naming its package and revision.
+
+  | Name | Location | Required | Type | Description |
+  | --- | --- | --: | --- | --- |
+  | `search` | Query | No | string | Searches the question package name or code. |
+  | `type` | Query | No | enum | `cbt` or `manual`. |
+  | `page`, `per_page` | Query | No | integer | Pagination, `per_page` 1–100. |
+
+  ```bash
+  curl -X GET "https://app.indolat.com/api/v1/question-banks?type=cbt&search=SNBT" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+
+  ```json
+  {
+    "success": true,
+    "message": null,
+    "data": [
+      {
+        "id": 88,
+        "name": "SNBT Literasi Paket 1 (rev. 3)",
+        "code": "API-K3J9QZ",
+        "type": "cbt",
+        "question_count": 20,
+        "is_locked": true,
+        "source": { "question_import_id": "0d6f1c2e-5b7a-4f1e-9a51-3c8e2b7d4a10", "package_id": "demo-pkg-001", "revision": 3 },
+        "created_at": "2026-10-06T10:00:05+07:00",
+        "updated_at": "2026-10-06T10:00:05+07:00"
+      }
+    ],
+    "meta": {
+      "pagination": { "total": 1, "per_page": 25, "current_page": 1, "last_page": 1, "from": 1, "to": 1 }
+    }
+  }
+  ```
+</Accordion>

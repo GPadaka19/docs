@@ -8,7 +8,7 @@ Seluruh request pada halaman ini membutuhkan [Bearer API Key](/api/autentikasi).
 
 ## Endpoint ujian
 
-Endpoint ujian bersifat read-only. Pembuatan ujian, tes, dan soal tetap dilakukan melalui panel.
+Halaman ini berisi endpoint untuk membaca ujian. Membuat dan mengubah ujian, tes, dan sesi lewat API dijelaskan di [Pengaturan Ujian](/api/pengaturan-ujian), sedangkan soal dikirim lewat [API Import Soal](/api/import-soal).
 
 ### Field penting pada ujian
 
@@ -19,11 +19,14 @@ Endpoint ujian bersifat read-only. Pembuatan ujian, tes, dan soal tetap dilakuka
 | `is_hidden` | Ujian diarsipkan dan tidak tampil bagi peserta. |
 | `is_tiered` | Ujian berjenjang: tes pada jenjang berikutnya terbuka setelah jenjang sebelumnya selesai. |
 | `is_auto_assign_session` | Peserta yang didaftarkan otomatis ditempatkan pada sesi yang paling awal dibuat untuk setiap tes. Jika `false`, sesi ditentukan admin melalui panel. |
+| `is_must_be_in_order` | Tes harus dikerjakan berurutan sesuai `level`. |
+| `is_force_complete` | Tes harus diselesaikan tanpa jeda sebelum lanjut ke tes berikutnya. |
 | `is_show_score` | Nilai akhir ditampilkan kepada peserta di CBT. Tidak membatasi nilai yang tersedia melalui API. |
+| `edition` | `standard` (Ujian Standard) atau `professional` (Ujian Professional). Menentukan kredit yang dipakai saat peserta mulai, batas jumlah tes, serta ketersediaan CAT dan proctoring kamera, layar, dan dual monitor. |
 | `final_score_type` | Cara menghitung nilai akhir ujian dari nilai tes: `1` akumulasi, `2` rata-rata. |
 | `paid_type` | `1` gratis, `2` sekali bayar, `3` berbayar per tes, `4` berbayar per jenjang. |
 
-Pada tes (`exam_quizzes`), `exam_type` bernilai `cbt`, `cat`, atau `manual`, dan `duration_minutes` adalah durasi pengerjaan tes.
+Pada tes (`exam_quizzes`), `exam_type` bernilai `cbt`, `cat`, atau `manual`, `duration_minutes` adalah durasi pengerjaan tes, `score_type` adalah metode penilaian, dan field `is_*` adalah pengaturan tes (lihat [Pengaturan Ujian](/api/pengaturan-ujian)). Pada sesi, `question_bank_id` adalah ID paket soal yang dikerjakan pada sesi tersebut.
 
 <Accordion title="GET /exams — Daftar ujian">
   ### Parameter
@@ -120,7 +123,10 @@ Pada tes (`exam_quizzes`), `exam_type` bernilai `cbt`, `cat`, atau `manual`, dan
       "is_hidden": false,
       "is_tiered": false,
       "is_auto_assign_session": true,
+      "is_must_be_in_order": false,
+      "is_force_complete": false,
       "is_show_score": true,
+      "edition": "professional",
       "final_score_type": 2,
       "final_score_type_label": "Rata-Rata Tes Ujian",
       "paid_type": 1,
@@ -135,15 +141,27 @@ Pada tes (`exam_quizzes`), `exam_type` bernilai `cbt`, `cat`, atau `manual`, dan
           "duration_minutes": 90,
           "exam_type": "cbt",
           "exam_type_label": "Computer Based Test (CBT)",
+          "score_type": "score",
+          "score_type_label": "Perhitungan Skor Soal (Akumulasi Benar/Salah)",
           "price": 0,
           "description": null,
+          "is_show_score": false,
+          "is_show_summary": false,
+          "is_show_explanation_per_question": false,
+          "is_switch_tab_proctoring": true,
+          "is_camera_proctoring": false,
+          "is_screen_proctoring": false,
+          "is_dual_screen_proctoring": false,
+          "is_audio_question_only_once": false,
+          "is_audio_answer_only_once": false,
           "sessions": [
             {
               "id": 91,
               "exam_quiz_id": 45,
               "name": "Sesi Pagi",
               "start_at": "2026-08-10T08:00:00+07:00",
-              "end_at": "2026-08-10T10:00:00+07:00"
+              "end_at": "2026-08-10T10:00:00+07:00",
+              "question_bank_id": 88
             }
           ],
           "created_at": "2026-07-01T08:00:00+07:00",
@@ -190,15 +208,27 @@ Pada tes (`exam_quizzes`), `exam_type` bernilai `cbt`, `cat`, atau `manual`, dan
         "duration_minutes": 90,
         "exam_type": "cbt",
         "exam_type_label": "Computer Based Test (CBT)",
+        "score_type": "score",
+        "score_type_label": "Perhitungan Skor Soal (Akumulasi Benar/Salah)",
         "price": 0,
         "description": null,
+        "is_show_score": false,
+        "is_show_summary": false,
+        "is_show_explanation_per_question": false,
+        "is_switch_tab_proctoring": true,
+        "is_camera_proctoring": false,
+        "is_screen_proctoring": false,
+        "is_dual_screen_proctoring": false,
+        "is_audio_question_only_once": false,
+        "is_audio_answer_only_once": false,
         "sessions": [
           {
             "id": 91,
             "exam_quiz_id": 45,
             "name": "Sesi Pagi",
             "start_at": "2026-08-10T08:00:00+07:00",
-            "end_at": "2026-08-10T10:00:00+07:00"
+            "end_at": "2026-08-10T10:00:00+07:00",
+            "question_bank_id": 88
           }
         ],
         "created_at": "2026-07-01T08:00:00+07:00",
@@ -238,7 +268,8 @@ Pada tes (`exam_quizzes`), `exam_type` bernilai `cbt`, `cat`, atau `manual`, dan
         "exam_quiz_id": 45,
         "name": "Sesi Pagi",
         "start_at": "2026-08-10T08:00:00+07:00",
-        "end_at": "2026-08-10T10:00:00+07:00"
+        "end_at": "2026-08-10T10:00:00+07:00",
+        "question_bank_id": 88
       }
     ]
   }

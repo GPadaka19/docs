@@ -8,7 +8,7 @@ Every request on this page requires a [Bearer API key](/en/api/autentikasi).
 
 ## Exam endpoints
 
-The exam endpoints are read-only. Exams, tests and questions are still created in the admin panel.
+This page covers the endpoints that read exams. Creating and changing exams, tests and sessions through the API is described in [Exam Setup](/en/api/pengaturan-ujian), and questions are sent through the [Question Import API](/en/api/import-soal).
 
 ### Key exam fields
 
@@ -19,11 +19,14 @@ The exam endpoints are read-only. Exams, tests and questions are still created i
 | `is_hidden` | The exam is archived and hidden from participants. |
 | `is_tiered` | Multi-level exam: tests in the next level open once the previous level is finished. |
 | `is_auto_assign_session` | Registered participants are automatically placed in the earliest-created session of each test. If `false`, an admin assigns sessions in the admin panel. |
+| `is_must_be_in_order` | Tests must be taken in order of `level`. |
+| `is_force_complete` | A test must be finished without a break before the next one. |
 | `is_show_score` | The final score is shown to participants in the CBT. It does not limit the scores available through the API. |
+| `edition` | `standard` (Standard Exam) or `professional` (Professional Exam). It decides which credit participants use when they start, the maximum number of tests, and whether CAT and camera, screen and dual-monitor proctoring are available. |
 | `final_score_type` | How the exam's final score is calculated from the test scores: `1` sum, `2` average. |
 | `paid_type` | `1` free, `2` one-time payment, `3` paid per test, `4` paid per level. |
 
-For tests (`exam_quizzes`), `exam_type` is `cbt`, `cat` or `manual`, and `duration_minutes` is the test's working time.
+For tests (`exam_quizzes`), `exam_type` is `cbt`, `cat` or `manual`, `duration_minutes` is the test's working time, `score_type` is the scoring method, and the `is_*` fields are the test settings (see [Exam Setup](/en/api/pengaturan-ujian)). On a session, `question_bank_id` is the ID of the question package taken in that session.
 
 <Accordion title="GET /exams — List exams">
   ### Parameters
@@ -120,7 +123,10 @@ For tests (`exam_quizzes`), `exam_type` is `cbt`, `cat` or `manual`, and `durati
       "is_hidden": false,
       "is_tiered": false,
       "is_auto_assign_session": true,
+      "is_must_be_in_order": false,
+      "is_force_complete": false,
       "is_show_score": true,
+      "edition": "professional",
       "final_score_type": 2,
       "final_score_type_label": "Rata-Rata Tes Ujian",
       "paid_type": 1,
@@ -135,15 +141,27 @@ For tests (`exam_quizzes`), `exam_type` is `cbt`, `cat` or `manual`, and `durati
           "duration_minutes": 90,
           "exam_type": "cbt",
           "exam_type_label": "Computer Based Test (CBT)",
+          "score_type": "score",
+          "score_type_label": "Perhitungan Skor Soal (Akumulasi Benar/Salah)",
           "price": 0,
           "description": null,
+          "is_show_score": false,
+          "is_show_summary": false,
+          "is_show_explanation_per_question": false,
+          "is_switch_tab_proctoring": true,
+          "is_camera_proctoring": false,
+          "is_screen_proctoring": false,
+          "is_dual_screen_proctoring": false,
+          "is_audio_question_only_once": false,
+          "is_audio_answer_only_once": false,
           "sessions": [
             {
               "id": 91,
               "exam_quiz_id": 45,
               "name": "Sesi Pagi",
               "start_at": "2026-08-10T08:00:00+07:00",
-              "end_at": "2026-08-10T10:00:00+07:00"
+              "end_at": "2026-08-10T10:00:00+07:00",
+              "question_bank_id": 88
             }
           ],
           "created_at": "2026-07-01T08:00:00+07:00",
@@ -190,15 +208,27 @@ For tests (`exam_quizzes`), `exam_type` is `cbt`, `cat` or `manual`, and `durati
         "duration_minutes": 90,
         "exam_type": "cbt",
         "exam_type_label": "Computer Based Test (CBT)",
+        "score_type": "score",
+        "score_type_label": "Perhitungan Skor Soal (Akumulasi Benar/Salah)",
         "price": 0,
         "description": null,
+        "is_show_score": false,
+        "is_show_summary": false,
+        "is_show_explanation_per_question": false,
+        "is_switch_tab_proctoring": true,
+        "is_camera_proctoring": false,
+        "is_screen_proctoring": false,
+        "is_dual_screen_proctoring": false,
+        "is_audio_question_only_once": false,
+        "is_audio_answer_only_once": false,
         "sessions": [
           {
             "id": 91,
             "exam_quiz_id": 45,
             "name": "Sesi Pagi",
             "start_at": "2026-08-10T08:00:00+07:00",
-            "end_at": "2026-08-10T10:00:00+07:00"
+            "end_at": "2026-08-10T10:00:00+07:00",
+            "question_bank_id": 88
           }
         ],
         "created_at": "2026-07-01T08:00:00+07:00",
@@ -238,7 +268,8 @@ For tests (`exam_quizzes`), `exam_type` is `cbt`, `cat` or `manual`, and `durati
         "exam_quiz_id": 45,
         "name": "Sesi Pagi",
         "start_at": "2026-08-10T08:00:00+07:00",
-        "end_at": "2026-08-10T10:00:00+07:00"
+        "end_at": "2026-08-10T10:00:00+07:00",
+        "question_bank_id": 88
       }
     ]
   }
