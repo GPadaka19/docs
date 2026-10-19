@@ -1,0 +1,484 @@
+---
+title: "Pengaturan Ujian"
+description: "Buat dan ubah ujian, tes, dan sesi lewat API, periksa kesiapan ujian, dan jalankan perhitungan IRT."
+sidebarTitle: "Pengaturan Ujian"
+---
+
+Seluruh request pada halaman ini membutuhkan [Bearer API Key](/api/autentikasi).
+
+Dengan endpoint ini sistem Anda dapat menyiapkan ujian dari awal sampai siap dikerjakan tanpa membuka panel: membuat ujian beserta tes dan sesinya, memasang paket soal ke setiap sesi, memeriksa kesiapan ujian, lalu menjalankan perhitungan IRT setelah peserta selesai.
+
+## Alur
+
+1. Siapkan paket soal lewat [API Import Soal](/api/import-soal) dan simpan `question_bank.id`, atau pilih paket soal yang sudah ada dengan `GET /question-banks`.
+2. Buat ujian beserta tes dan sesinya dalam satu request `POST /exams`.
+3. Periksa `GET /exams/{exam}/readiness` sampai `ready` bernilai `true`.
+4. Daftarkan peserta dan buat link akses lewat [Pendaftaran dan Link Ujian](/api/pendaftaran-ujian).
+5. Untuk tes dengan penilaian IRT, jalankan `POST /exams/{exam}/irt-calculations` setelah peserta selesai. Nilai dikirim lewat webhook `exam_result.scored` dan tersedia di [API Hasil Ujian](/api/hasil-ujian).
+
+## Aturan
+
+- **Jenis ujian.** Ujian yang dibuat lewat API tidak memakai pembayaran di CBT dan bukan ujian multi-level. Ujian multi-level atau ujian dengan pembayaran di CBT yang dibuat di panel tetap dapat dibaca, tetapi hanya dapat diubah atau dihapus melalui panel. Tes jawaban manual (esai/unggah berkas) dibuat di panel; lewat API hanya nama, instruksi, dan sesinya yang dapat diubah.
+- **Edisi** (`edition`):
+  - `standard` (Ujian Standard): maksimal 4 tes, tanpa CAT dan tanpa proctoring kamera, layar, atau dual monitor.
+  - `professional` (Ujian Professional): maksimal 30 tes, dengan semua fitur.
+  - Kredit dipotong saat peserta mulai mengerjakan tes, bukan saat ujian dibuat. Ujian professional memakai kredit professional; ujian standard memakai kredit gratis lebih dulu, lalu kredit professional. Tanpa kredit, ujian tetap dapat dibuat, tetapi peserta tidak dapat memulai tes.
+- **Waktu** dikirim dalam ISO 8601 dengan offset, misalnya `2026-11-10T08:00:00+07:00` atau `2026-11-10T01:00:00Z`, dan dikembalikan dalam WIB (`+07:00`). Waktu tanpa offset, seperti `2026-11-10 08:00:00`, ditolak dengan `422`. `end_at` ujian paling lambat satu tahun dari sekarang.
+- **Sesi** harus berada di dalam rentang waktu ujian dan berlangsung minimal sepanjang durasi tesnya. Paket soal sesi harus milik projek, sejenis dengan tesnya (CBT/CAT untuk tes CBT dan CAT, jawaban manual untuk tes jawaban manual), dan berisi minimal satu soal; untuk tes CAT, semua soal wajib memiliki tingkat kesulitan.
+- **Sesi otomatis** (`is_auto_assign_session`, default `true`): peserta yang didaftarkan mendapat sesi pertama (yang paling awal dibuat) dari setiap tes. Peserta yang terdaftar sebelum sebuah tes memiliki sesi otomatis mendapat sesi tersebut saat sesi dibuat.
+- **Urutan tes** mengikuti urutan pembuatannya. Jika `is_must_be_in_order` bernilai `true`, peserta harus menyelesaikan tes sesuai urutan itu.
+- **Peserta melihat ujian** selama berada di dalam rentang waktunya dan belum diarsipkan. Tes hanya dapat dimulai di dalam jadwal sesi yang memiliki paket soal.
+
+### Yang terkunci
+
+| Kondisi | Yang tidak dapat dilakukan |
+| --- | --- |
+| Ujian terkunci (dikunci saat diarsipkan di panel) | Semua perubahan pada ujian, tes, dan sesinya. |
+| Ada peserta yang sedang mengerjakan tes | Mengubah tanggal ujian, durasi tes tersebut, dan sesi tempat peserta mengerjakan. |
+| Sudah ada peserta yang mulai mengerjakan | Menghapus ujian, mengubah jenis tes, dan mengganti paket soal pada sesi tersebut. |
+| Sudah ada peserta terdaftar | Mengubah kode ujian, menghapus tes, dan menghapus sesi yang sudah dipakai peserta. |
+
+### Format error
+
+Kesalahan isian dikembalikan dengan status `422` dalam format error yang sama dengan endpoint lain. Kunci error menunjuk field-nya, termasuk field bersarang, misalnya `exam_quizzes.0.sessions.1.end_at`.
+
+```json
+{
+  "success": false,
+  "message": "Data yang dikirim tidak valid.",
+  "errors": {
+    "exam_quizzes.0.sessions.0.end_at": ["Sesi minimal 90 menit, sama dengan durasi tes."],
+    "exam_quizzes.1.is_camera_proctoring": ["Hanya tersedia untuk ujian edisi professional."]
+  }
+}
+```
+
+Perubahan yang ditolak karena kondisi ujian dikembalikan dengan status `409` dan field `code`:
+
+```json
+{
+  "success": false,
+  "message": "Tanggal ujian tidak dapat diubah karena ada peserta yang sedang mengerjakan tes.",
+  "code": "attempt_in_progress"
+}
+```
+
+| `code` | Arti |
+| --- | --- |
+| `exam_code_taken` | `name_short` sudah dipakai ujian lain di projek. Respons berisi `exam_id` ujian tersebut, sehingga request yang terulang dapat dikenali. |
+| `exam_locked` | Ujian terkunci karena diarsipkan di panel. |
+| `tiered_exam_not_supported` | Ujian multi-level hanya dapat diubah melalui panel. |
+| `paid_exam_not_supported` | Ujian dengan pembayaran di CBT hanya dapat diubah melalui panel. |
+| `storage_full` | Penyimpanan projek penuh, sehingga ujian dan tes baru tidak dapat dibuat. |
+| `attempt_in_progress` | Ada peserta yang sedang mengerjakan tes. |
+| `attempt_started` | Sudah ada peserta yang mulai mengerjakan tes. |
+| `participants_registered` | Sudah ada peserta terdaftar atau ditempatkan pada sesi. |
+| `no_irt_exam_quiz` | Ujian tidak memiliki tes dengan penilaian IRT. |
+| `no_completed_attempts` | Belum ada peserta yang menyelesaikan tes. |
+| `calculation_running` | Perhitungan IRT ujian sedang diantrekan atau berjalan. |
+
+## Pengaturan tes
+
+| Field | Default | Keterangan |
+| --- | --- | --- |
+| `exam_type` | `cbt` | `cbt` atau `cat`. CAT hanya untuk edisi professional dan hanya mendukung `score_type` `score`. |
+| `score_type` | `score` | `score` (akumulasi benar/salah), `answer_score` (akumulasi skor jawaban), `group` (psikotes), `irt` (referensi UTBK 0–1000), `irt_tka_sma` (200–800), atau `irt_tka_sd_smp` (0–100). Nilai IRT baru terisi setelah perhitungan IRT dijalankan (lihat [Kesiapan dan penilaian](#kesiapan-dan-penilaian)). |
+| `duration_minutes` | — | Durasi pengerjaan tes, 1–1440 menit (bilangan bulat). Wajib saat membuat tes. Tes yang dibuat di panel dapat berdurasi pecahan, misalnya `45.5`. |
+| `description` | Instruksi standar | HTML instruksi pengerjaan, maksimal 1.000 karakter teks. Dapat memakai `{{NAMA_TES}}`, `{{JUMLAH_SOAL}}`, dan `{{DURASI_TES}}`. |
+| `is_show_score` | `false` | Tampilkan nilai tes kepada peserta setelah selesai. |
+| `is_show_summary` | `false` | Tampilkan ringkasan benar-salah setelah selesai. |
+| `is_show_explanation_per_question` | `false` | Tampilkan pembahasan per soal (dari pembahasan setiap soal di paket soal) setelah selesai. Jika diaktifkan, file PDF pembahasan tes yang diunggah di panel tidak dipakai lagi. |
+| `is_switch_tab_proctoring` | `false` | Deteksi peserta yang berpindah tab. |
+| `is_camera_proctoring` | `false` | Peserta wajib mengaktifkan kamera selama mengerjakan. Hanya edisi professional. |
+| `is_screen_proctoring` | `false` | Peserta wajib membagikan layar selama mengerjakan. Hanya edisi professional. |
+| `is_dual_screen_proctoring` | `false` | Hanya izinkan satu layar (monitor). Hanya edisi professional. |
+| `is_audio_question_only_once` | `false` | Audio soal hanya dapat diputar sekali. |
+| `is_audio_answer_only_once` | `false` | Audio jawaban hanya dapat diputar sekali. |
+
+## Endpoint ujian
+
+<Accordion title="POST /exams — Membuat ujian beserta tes dan sesinya">
+  Seluruh isi request diperiksa lebih dulu; jika ada kesalahan, tidak ada yang disimpan. Tes dan sesi bersifat opsional dan dapat ditambahkan belakangan.
+
+  ### Parameter
+
+  | Nama | Lokasi | Wajib | Tipe | Keterangan |
+  | --- | --- | --: | --- | --- |
+  | `name` | Body | Ya | string | Nama ujian, maksimal 255 karakter. |
+  | `name_short` | Body | Ya | string | Kode ujian, unik per projek, maksimal 50 karakter: huruf, angka, `-`, dan `#`. Disimpan dalam huruf besar. |
+  | `description` | Body | Tidak | string | HTML deskripsi ujian (tag `b i em span strong br`), maksimal 1.000 karakter teks. Default: nama ujian. |
+  | `start_at`, `end_at` | Body | Ya | datetime | Rentang waktu ujian. |
+  | `edition` | Body | Tidak | enum | `standard` atau `professional`. Default `standard`. |
+  | `is_must_be_in_order` | Body | Tidak | boolean | Tes harus dikerjakan berurutan. Default `false`. |
+  | `is_force_complete` | Body | Tidak | boolean | Tes harus diselesaikan tanpa jeda. Default `false`. |
+  | `is_show_score` | Body | Tidak | boolean | Tampilkan nilai akhir ujian kepada peserta. Default `false`. |
+  | `final_score_type` | Body | Tidak | integer | `1` akumulasi, `2` rata-rata. Default `2`. |
+  | `is_auto_assign_session` | Body | Tidak | boolean | Default `true`. |
+  | `exam_quizzes` | Body | Tidak | array | Tes ujian, lihat [Pengaturan tes](#pengaturan-tes). Masing-masing dapat berisi `sessions`. |
+  | `exam_quizzes.*.sessions` | Body | Tidak | array | Sesi tes: `name`, `start_at`, `end_at`, dan `question_bank_id` (boleh `null` untuk diisi belakangan). Maksimal 50 sesi per tes. |
+
+  ### Contoh request
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "Tryout SNBT 1",
+      "name_short": "TO-SNBT-1",
+      "start_at": "2026-11-10T08:00:00+07:00",
+      "end_at": "2026-11-10T17:00:00+07:00",
+      "edition": "professional",
+      "is_must_be_in_order": true,
+      "exam_quizzes": [
+        {
+          "name": "Penalaran Umum",
+          "duration_minutes": 90,
+          "score_type": "irt",
+          "is_switch_tab_proctoring": true,
+          "sessions": [
+            { "name": "Sesi 1", "start_at": "2026-11-10T08:00:00+07:00", "end_at": "2026-11-10T10:00:00+07:00", "question_bank_id": 88 }
+          ]
+        },
+        {
+          "name": "Literasi Bahasa Indonesia",
+          "duration_minutes": 60,
+          "score_type": "irt",
+          "sessions": [
+            { "name": "Sesi 1", "start_at": "2026-11-10T10:00:00+07:00", "end_at": "2026-11-10T11:00:00+07:00", "question_bank_id": 89 }
+          ]
+        }
+      ]
+    }'
+  ```
+
+  ### Contoh response
+
+  Status `201`. Isinya sama dengan [detail ujian](/api/ujian), termasuk `exam_quizzes` dan `sessions` beserta ID-nya. Simpan ID ujian, tes, dan sesi untuk perubahan berikutnya.
+
+  ```json
+  {
+    "success": true,
+    "message": "Ujian berhasil dibuat.",
+    "data": {
+      "id": 31,
+      "name": "Tryout SNBT 1",
+      "name_short": "TO-SNBT-1",
+      "start_at": "2026-11-10T08:00:00+07:00",
+      "end_at": "2026-11-10T17:00:00+07:00",
+      "is_auto_assign_session": true,
+      "is_must_be_in_order": true,
+      "is_force_complete": false,
+      "is_show_score": false,
+      "edition": "professional",
+      "final_score_type": 2,
+      "exam_quizzes": [
+        {
+          "id": 120,
+          "exam_id": 31,
+          "name": "Penalaran Umum",
+          "level": 1,
+          "duration_minutes": 90,
+          "exam_type": "cbt",
+          "score_type": "irt",
+          "is_switch_tab_proctoring": true,
+          "sessions": [
+            { "id": 301, "exam_quiz_id": 120, "name": "Sesi 1", "start_at": "2026-11-10T08:00:00+07:00", "end_at": "2026-11-10T10:00:00+07:00", "question_bank_id": 88 }
+          ]
+        },
+        {
+          "id": 121,
+          "exam_id": 31,
+          "name": "Literasi Bahasa Indonesia",
+          "level": 2,
+          "duration_minutes": 60,
+          "exam_type": "cbt",
+          "score_type": "irt",
+          "is_switch_tab_proctoring": false,
+          "sessions": [
+            { "id": 302, "exam_quiz_id": 121, "name": "Sesi 1", "start_at": "2026-11-10T10:00:00+07:00", "end_at": "2026-11-10T11:00:00+07:00", "question_bank_id": 89 }
+          ]
+        }
+      ],
+      "participants_count": 0
+    }
+  }
+  ```
+
+  Contoh di atas dipersingkat; respons lengkap berisi semua field ujian, tes, dan sesi.
+</Accordion>
+
+<Accordion title="PATCH /exams/{exam} — Mengubah ujian">
+  Hanya field yang dikirim yang diubah. Field yang tersedia sama dengan `POST /exams` tanpa `exam_quizzes`. Endpoint juga menerima metode `PUT`.
+
+  - Rentang waktu baru harus tetap mencakup semua sesi; ubah sesinya lebih dulu jika perlu.
+  - Mengubah `edition` menjadi `standard` ditolak jika ujian memiliki lebih dari 4 tes atau tes yang memakai fitur professional.
+  - Mengubah `final_score_type` menghitung ulang nilai akhir peserta.
+  - Mengaktifkan `is_auto_assign_session` langsung menempatkan peserta yang belum memiliki sesi ke sesi pertama setiap tes.
+
+  ### Contoh request
+
+  ```bash
+  curl -X PATCH "https://app.indolat.com/api/v1/exams/31" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "end_at": "2026-11-10T18:00:00+07:00", "is_show_score": true }'
+  ```
+
+  Respons berisi ujian terbaru, dengan bentuk yang sama seperti `POST /exams`.
+</Accordion>
+
+<Accordion title="DELETE /exams/{exam} — Menghapus ujian">
+  Ditolak dengan `409` (`attempt_started`) jika sudah ada peserta yang mulai mengerjakan tes. Ujian multi-level dan ujian dengan pembayaran di CBT hanya dapat dihapus melalui panel.
+
+  ```bash
+  curl -X DELETE "https://app.indolat.com/api/v1/exams/31" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+</Accordion>
+
+## Endpoint tes
+
+<Accordion title="POST /exams/{exam}/quizzes — Menambah tes">
+  Body sama dengan satu item `exam_quizzes` pada `POST /exams`, termasuk `sessions`. Tes baru ditempatkan di urutan terakhir. Peserta yang sudah terdaftar langsung mendapat tes baru ini, dan mendapat sesinya jika sesi otomatis aktif.
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams/31/quizzes" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "Literasi Bahasa Inggris",
+      "duration_minutes": 30,
+      "score_type": "irt",
+      "sessions": [
+        { "name": "Sesi 1", "start_at": "2026-11-10T11:00:00+07:00", "end_at": "2026-11-10T12:00:00+07:00", "question_bank_id": 90 }
+      ]
+    }'
+  ```
+
+  Status `201`; respons berisi tes beserta sesinya.
+</Accordion>
+
+<Accordion title="PATCH /exams/{exam}/quizzes/{examQuiz} — Mengubah tes">
+  Hanya field yang dikirim yang diubah: `name`, `exam_type`, `duration_minutes`, `score_type`, `description`, dan pengaturan `is_*`. Durasi baru tidak boleh lebih panjang dari sesi tes yang ada. Pada tes jawaban manual, hanya `name` dan `description` yang dapat diubah; field lain ditolak dengan `422`. Endpoint juga menerima metode `PUT`.
+
+  ```bash
+  curl -X PATCH "https://app.indolat.com/api/v1/exams/31/quizzes/120" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "is_show_score": true, "is_show_summary": true }'
+  ```
+</Accordion>
+
+<Accordion title="DELETE /exams/{exam}/quizzes/{examQuiz} — Menghapus tes">
+  Ditolak dengan `409` (`participants_registered`) jika sudah ada peserta terdaftar pada ujian. Sesi tes ikut terhapus.
+
+  ```bash
+  curl -X DELETE "https://app.indolat.com/api/v1/exams/31/quizzes/121" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+</Accordion>
+
+## Endpoint sesi
+
+<Accordion title="POST /exams/{exam}/quizzes/{examQuiz}/sessions — Menambah sesi">
+  | Nama | Lokasi | Wajib | Tipe | Keterangan |
+  | --- | --- | --: | --- | --- |
+  | `name` | Body | Ya | string | Nama sesi, maksimal 255 karakter. |
+  | `start_at`, `end_at` | Body | Ya | datetime | Jadwal sesi, di dalam rentang ujian dan minimal sepanjang durasi tes. |
+  | `question_bank_id` | Body | Tidak | integer/null | ID paket soal yang dikerjakan pada sesi ini. Jenisnya harus sesuai tes: CBT/CAT, atau jawaban manual untuk tes jawaban manual. |
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams/31/quizzes/120/sessions" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "name": "Sesi 2", "start_at": "2026-11-10T13:00:00+07:00", "end_at": "2026-11-10T15:00:00+07:00", "question_bank_id": 88 }'
+  ```
+
+  Status `201`:
+
+  ```json
+  {
+    "success": true,
+    "message": "Sesi berhasil ditambahkan.",
+    "data": {
+      "id": 303,
+      "exam_quiz_id": 120,
+      "name": "Sesi 2",
+      "start_at": "2026-11-10T13:00:00+07:00",
+      "end_at": "2026-11-10T15:00:00+07:00",
+      "question_bank_id": 88
+    }
+  }
+  ```
+
+  Peserta yang sedang mengerjakan saat sesi berakhir otomatis diselesaikan oleh sistem.
+</Accordion>
+
+<Accordion title="PATCH /exams/{exam}/sessions/{session} — Mengubah sesi">
+  Hanya field yang dikirim yang diubah dan diperiksa, sehingga mengganti nama sesi tidak memeriksa ulang jadwal dan paket soalnya. Ditolak dengan `409` jika ada peserta yang sedang mengerjakan pada sesi ini, dan paket soal tidak dapat diganti setelah ada peserta yang mulai mengerjakan. Untuk mengganti revisi paket soal sebelum ujian dimulai, kirim `question_bank_id` yang baru. Endpoint juga menerima metode `PUT`.
+
+  ```bash
+  curl -X PATCH "https://app.indolat.com/api/v1/exams/31/sessions/301" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d '{ "question_bank_id": 95 }'
+  ```
+</Accordion>
+
+<Accordion title="DELETE /exams/{exam}/sessions/{session} — Menghapus sesi">
+  Ditolak dengan `409` (`participants_registered`) jika sudah ada peserta yang ditempatkan pada sesi ini.
+
+  ```bash
+  curl -X DELETE "https://app.indolat.com/api/v1/exams/31/sessions/303" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+</Accordion>
+
+## Kesiapan dan penilaian
+
+<Accordion title="GET /exams/{exam}/readiness — Memeriksa kesiapan ujian">
+  Mendaftar hal yang membuat peserta belum dapat mengerjakan ujian. `ready` bernilai `true` jika tidak ada masalah ber-`severity` `error`; `warning` menandai hal yang perlu diperhatikan tetapi tidak menghalangi.
+
+  | `code` | Severity | Arti |
+  | --- | --- | --- |
+  | `exam_archived` | error | Ujian sudah diarsipkan sehingga tidak tampil bagi peserta. |
+  | `exam_ended` | error | Rentang waktu ujian sudah berakhir. |
+  | `no_exam_quizzes` | error | Ujian belum memiliki tes. |
+  | `no_session` | error | Tes belum memiliki sesi. |
+  | `no_question_bank` | error | Sesi belum memiliki paket soal. |
+  | `empty_question_bank` | error | Paket soal sesi belum berisi soal. |
+  | `missing_question_levels` | error | Tes CAT memakai paket soal dengan soal tanpa tingkat kesulitan. |
+  | `session_outside_exam` | error | Sesi berada di luar rentang ujian. |
+  | `session_too_short` | error | Sesi lebih pendek dari durasi tes. |
+  | `all_sessions_ended` | error | Semua sesi tes sudah berakhir, sehingga tidak ada peserta yang dapat memulainya. |
+  | `exam_locked` | warning | Ujian terkunci sehingga tidak dapat diubah lagi; peserta tetap dapat mengerjakannya. |
+  | `participants_without_session` | warning | Ada peserta yang belum mendapat sesi. |
+  | `session_ended` | warning | Sesi sudah berakhir, sementara sesi lain pada tes yang sama masih berjalan atau akan datang. |
+  | `no_credit` | warning | Kredit ujian projek habis; peserta tidak dapat memulai tes. |
+
+  ```bash
+  curl -X GET "https://app.indolat.com/api/v1/exams/31/readiness" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+
+  ```json
+  {
+    "success": true,
+    "message": null,
+    "data": {
+      "exam_id": 31,
+      "ready": false,
+      "issues": [
+        {
+          "severity": "error",
+          "code": "no_question_bank",
+          "message": "Sesi \"Sesi 1\" belum memiliki paket soal.",
+          "exam_quiz_id": 121,
+          "session_id": 302
+        }
+      ]
+    }
+  }
+  ```
+</Accordion>
+
+<Accordion title="POST /exams/{exam}/irt-calculations — Menjalankan perhitungan IRT">
+  Menghitung nilai semua tes ber-IRT pada ujian, sama seperti **Hitung Skor → Perhitungan IRT** di panel. Dapat dijalankan setelah ada peserta yang menyelesaikan tes dan tidak ada peserta yang sedang mengerjakan. Perhitungan dapat dijalankan ulang, misalnya setelah peserta susulan selesai; setiap perubahan nilai mengirim webhook `exam_result.scored`. Selama perhitungan masih diantrekan atau berjalan, request berikutnya ditolak dengan `409` (`calculation_running`).
+
+  ```bash
+  curl -X POST "https://app.indolat.com/api/v1/exams/31/irt-calculations" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+
+  Status `202`:
+
+  ```json
+  {
+    "success": true,
+    "message": "Perhitungan IRT diantrekan. Nilai baru dikirim lewat webhook exam_result.scored.",
+    "data": { "exam_id": 31, "exam_quiz_ids": [120, 121] }
+  }
+  ```
+</Accordion>
+
+<Accordion title="GET /exams/{exam}/irt-calculations — Status perhitungan IRT">
+  Status perhitungan terakhir setiap tes ber-IRT:
+
+  | `status` | Arti |
+  | --- | --- |
+  | `not_started` | Perhitungan belum pernah dijalankan. |
+  | `queued` | Perhitungan sudah diantrekan dan belum mulai diproses; `queued_at` berisi waktu antreannya. |
+  | `running` | Perhitungan sedang berjalan. |
+  | `finished` | Perhitungan selesai. |
+  | `failed` | Perhitungan gagal. Jalankan ulang dengan `POST /exams/{exam}/irt-calculations`. |
+
+  ```json
+  {
+    "success": true,
+    "message": null,
+    "data": [
+      {
+        "exam_quiz_id": 120,
+        "exam_quiz_name": "Penalaran Umum",
+        "status": "finished",
+        "queued_at": null,
+        "started_at": "2026-11-10T18:05:00+07:00",
+        "finished_at": "2026-11-10T18:06:12+07:00"
+      }
+    ]
+  }
+  ```
+</Accordion>
+
+## Paket soal
+
+<Accordion title="GET /question-banks — Daftar paket soal">
+  Paket soal projek untuk dipasang ke sesi. Paket soal hasil [import](/api/import-soal) memiliki `is_locked: true` dan `source` berisi paket serta revisi asalnya.
+
+  | Nama | Lokasi | Wajib | Tipe | Keterangan |
+  | --- | --- | --: | --- | --- |
+  | `search` | Query | Tidak | string | Mencari nama atau kode paket soal. |
+  | `type` | Query | Tidak | enum | `cbt` atau `manual`. |
+  | `page`, `per_page` | Query | Tidak | integer | Pagination, `per_page` 1–100. |
+
+  ```bash
+  curl -X GET "https://app.indolat.com/api/v1/question-banks?type=cbt&search=SNBT" \
+    -H "Authorization: Bearer <API_KEY>" \
+    -H "Accept: application/json"
+  ```
+
+  ```json
+  {
+    "success": true,
+    "message": null,
+    "data": [
+      {
+        "id": 88,
+        "name": "SNBT Literasi Paket 1 (rev. 3)",
+        "code": "API-K3J9QZ",
+        "type": "cbt",
+        "question_count": 20,
+        "is_locked": true,
+        "source": { "question_import_id": "0d6f1c2e-5b7a-4f1e-9a51-3c8e2b7d4a10", "package_id": "demo-pkg-001", "revision": 3 },
+        "created_at": "2026-10-06T10:00:05+07:00",
+        "updated_at": "2026-10-06T10:00:05+07:00"
+      }
+    ],
+    "meta": {
+      "pagination": { "total": 1, "per_page": 25, "current_page": 1, "last_page": 1, "from": 1, "to": 1 }
+    }
+  }
+  ```
+</Accordion>
